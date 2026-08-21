@@ -5,49 +5,58 @@ on:
     branches: [ci/validate-plugin-1.3.7]
     paths:
       - ".github/workflows/package-1.3.7.yml"
-  pull_request:
-    branches: [feat/bambuddy-inventory-only]
-    paths:
-      - ".github/workflows/package-1.3.7.yml"
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   package:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout packaging branch
+        uses: actions/checkout@v4
+        with:
+          ref: ci/validate-plugin-1.3.7
+          fetch-depth: 0
+      - name: Checkout exact validated plugin source
+        uses: actions/checkout@v4
         with:
           ref: 88f19f100dda3559ae753dfe1ba9d741a2185a46
+          path: source
       - name: Verify manifest version
         run: |
           python - <<'PY'
           import json
-          data = json.load(open('bambuddy/plugin.json', encoding='utf-8'))
+          data = json.load(open('source/bambuddy/plugin.json', encoding='utf-8'))
           assert data['plugin_key'] == 'bambuddy'
           assert data['version'] == '1.3.7'
           print('manifest OK:', data['plugin_key'], data['version'])
           PY
       - name: Build installable ZIP
         run: |
+          rm -rf dist
+          mkdir -p dist
           python - <<'PY'
           from pathlib import Path
           import zipfile
-          root = Path('bambuddy')
-          out = Path('bambuddy-1.3.7.zip')
+          root = Path('source/bambuddy')
+          out = Path('dist/bambuddy-1.3.7.zip')
           with zipfile.ZipFile(out, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
               for path in sorted(root.rglob('*')):
                   if path.is_file() and '__pycache__' not in path.parts and path.suffix != '.pyc':
-                      zf.write(path, path.as_posix())
+                      zf.write(path, Path('bambuddy') / path.relative_to(root))
           print(out, out.stat().st_size)
           PY
-          sha256sum bambuddy-1.3.7.zip | tee bambuddy-1.3.7.sha256
-      - uses: actions/upload-artifact@v4
-        with:
-          name: bambuddy-1.3.7
-          path: |
-            bambuddy-1.3.7.zip
-            bambuddy-1.3.7.sha256
-          if-no-files-found: error
-          retention-days: 30
+          sha256sum dist/bambuddy-1.3.7.zip | tee dist/bambuddy-1.3.7.sha256
+          printf '%s\n' 'source_commit=88f19f100dda3559ae753dfe1ba9d741a2185a46' > dist/bambuddy-1.3.7.source.txt
+      - name: Commit packaged artifact
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -f dist/bambuddy-1.3.7.zip dist/bambuddy-1.3.7.sha256 dist/bambuddy-1.3.7.source.txt
+          if git diff --cached --quiet; then
+            echo 'Artifact unchanged'
+            exit 0
+          fi
+          git commit -m "build: package Bambuddy plugin 1.3.7"
+          git push origin HEAD:ci/validate-plugin-1.3.7
