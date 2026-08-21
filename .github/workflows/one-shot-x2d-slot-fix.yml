@@ -1,6 +1,8 @@
 name: One-shot X2D external slot fix
 
 on:
+  push:
+    branches: [fix/x2d-external-slot-canonical-1.3.9]
   pull_request:
     branches: [main]
 
@@ -9,13 +11,13 @@ permissions:
 
 jobs:
   patch-test-commit:
-    if: github.head_ref == 'fix/x2d-external-slot-canonical-1.3.9'
+    if: github.ref_name == 'fix/x2d-external-slot-canonical-1.3.9' || github.head_ref == 'fix/x2d-external-slot-canonical-1.3.9'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout feature branch
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.head_ref }}
+          ref: ${{ github.head_ref || github.ref_name }}
           fetch-depth: 0
 
       - name: Apply product patch and regressions
@@ -87,7 +89,6 @@ def test_manifest_version_is_1_3_9():
     assert manifest["version"] == "1.3.9"
 '''
           if 'test_pending_snapshot_uses_canonical_external_slot_ids' not in tests:
-              # Ensure imports used by the source-level regressions exist.
               if 'from pathlib import Path' not in tests:
                   tests = 'from pathlib import Path\nimport json\nimport re\n' + tests
               else:
@@ -135,9 +136,10 @@ def test_manifest_version_is_1_3_9():
       - name: Commit validated product patch and remove one-shot workflow
         shell: bash
         run: |
+          BRANCH='${{ github.head_ref || github.ref_name }}'
           rm .github/workflows/one-shot-x2d-slot-fix.yml
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add bambuddy/driver.py bambuddy/plugin.json tests/test_external_slots.py .github/workflows/one-shot-x2d-slot-fix.yml
           git commit -m 'fix: canonicalize X2D external slot snapshots'
-          git push origin HEAD:${{ github.head_ref }}
+          git push origin HEAD:"$BRANCH"
