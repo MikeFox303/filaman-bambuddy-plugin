@@ -86,3 +86,47 @@ async def test_modern_usage_without_bambuddy_spool_id_uses_slot_fallback():
     })
 
     assert calls == [(99, 3.2, {"source_event_key": "run-2:None:255:1"})]
+
+
+@pytest.mark.asyncio
+async def test_modern_usage_without_event_id_does_not_create_permanent_legacy_key():
+    driver = object.__new__(Driver)
+    driver._bambuddy_printer_id = 3
+    driver.printer_id = 7
+    driver._spoolman_enabled = False
+    driver._slot_to_filaman_spool = {}
+    calls = []
+    driver._resolve_bambuddy_spool_id = lambda spool_id: _resolved(42, spool_id)
+    driver._report_consumption = lambda spool, grams, **kw: _record(calls, spool, grams, kw)
+
+    event = {
+        "type": "spool_usage_logged",
+        "printer_id": 3,
+        "usage": [{"spool_id": 17, "weight_used": 1.5, "ams_id": 0, "tray_id": 2}],
+    }
+    await driver._handle_spool_usage_logged(event)
+    await driver._handle_spool_usage_logged(event)
+
+    assert calls == [
+        (42, 1.5, {"source_event_key": None}),
+        (42, 1.5, {"source_event_key": None}),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_legacy_print_complete_reprints_do_not_collide_on_filename_key():
+    driver = object.__new__(Driver)
+    driver._bambuddy_printer_id = 3
+    driver._spoolman_enabled = False
+    driver._slot_to_filaman_spool = {"0-0": 42}
+    calls = []
+    driver._report_consumption = lambda spool, grams, **kw: _record(calls, spool, grams, kw)
+
+    payload = {"weight_used": 2.0, "filename": "same-file.3mf"}
+    await driver._handle_print_complete(payload, event_id="")
+    await driver._handle_print_complete(payload, event_id="")
+
+    assert calls == [
+        (42, 2.0, {"source_event_key": None}),
+        (42, 2.0, {"source_event_key": None}),
+    ]

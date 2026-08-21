@@ -5050,7 +5050,8 @@ class Driver(BaseDriver):
         weight_used = data.get("weight_used")
         if not weight_used:
             return
-        fallback_key = event_id or f"legacy:{self._bambuddy_printer_id}:{data.get('subtask_name') or data.get('filename') or 'unknown'}"
+        fallback_key: str | None = None
+        logger.warning("Legacy print_complete has no stable run identity; recording without a persistent idempotency key")
         if isinstance(weight_used, dict):
             for slot_key, raw_weight in weight_used.items():
                 weight_g = _float_or_none(raw_weight)
@@ -5058,7 +5059,7 @@ class Driver(BaseDriver):
                     continue
                 filaman_spool_id = self._slot_to_filaman_spool.get(str(slot_key))
                 if filaman_spool_id:
-                    await self._report_consumption(filaman_spool_id, weight_g, source_event_key=f"{fallback_key}:{slot_key}")
+                    await self._report_consumption(filaman_spool_id, weight_g, source_event_key=(f"{fallback_key}:{slot_key}" if fallback_key else None))
         elif isinstance(weight_used, (int, float)) and math.isfinite(float(weight_used)) and float(weight_used) > 0:
             active_slots = list(self._slot_to_filaman_spool.items())
             if len(active_slots) == 1:
@@ -5093,7 +5094,13 @@ class Driver(BaseDriver):
             if filaman_id is None:
                 logger.warning("Unknown Bambuddy spool %s; skipping usage (event=%s)", bb_id, event_id)
                 continue
-            key = f"{event_id or 'legacy'}:{bb_id}:{ams_id if ams_id is not None else ''}:{tray_id if tray_id is not None else ''}"
+            key = (
+                f"{event_id}:{bb_id}:{ams_id if ams_id is not None else ''}:{tray_id if tray_id is not None else ''}"
+                if event_id
+                else None
+            )
+            if not event_id:
+                logger.warning("spool_usage_logged has no stable event_id; recording usage without a persistent idempotency key")
             await self._report_consumption(filaman_id, weight, source_event_key=key)
 
     async def _resolve_bambuddy_spool_id(self, bambuddy_spool_id: int) -> int | None:
@@ -6612,7 +6619,7 @@ class Driver(BaseDriver):
                     snap[f"{ams_id}-{tray_id}"] = self._tray_snapshot(tray)
             for vt in status.get("vt_tray") or []:
                 vt_id = int(vt.get("id", 254))
-                snap[f"255-{vt_id}"] = self._tray_snapshot(vt)
+                snap[external_slot_index(vt_id)] = self._tray_snapshot(vt)
             self._pending_slot_snapshot = snap
             logger.info(
                 f"Pending snapshot captured for printer {self.printer_id}: "
@@ -7093,12 +7100,14 @@ class Driver(BaseDriver):
                 {
                     "action": "trigger_sync",
                     "label": "Sync Now",
+                    "labelByLocale": {"ru": "Синхронизировать", "uk": "Синхронізувати"},
                     "label_de": "Jetzt synchronisieren",
                     "variant": "secondary",
                 },
                 {
                     "action": "full_resync",
                     "label": "Full Resync",
+                    "labelByLocale": {"ru": "Полная пересинхронизация", "uk": "Повна повторна синхронізація"},
                     "label_de": "Vollständiger Resync",
                     "variant": "danger",
                 },
