@@ -76,6 +76,6 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git rm .github/workflows/one-shot-package-1.3.8.yml
-          git add dist/bambuddy-1.3.8.zip dist/bambuddy-1.3.8.sha256 dist/bambuddy-1.3.8.source.txt
+          git add -f dist/bambuddy-1.3.8.zip dist/bambuddy-1.3.8.sha256 dist/bambuddy-1.3.8.source.txt
           git commit -m "release: package Bambuddy plugin 1.3.8"
           git push origin HEAD:release/plugin-1.3.8-package
