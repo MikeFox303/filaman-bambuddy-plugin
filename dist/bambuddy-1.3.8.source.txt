@@ -1,0 +1,4 @@
+source_commit=c2c1ad390e6a7f64174185802a6408d884318083
+plugin_key=bambuddy
+version=1.3.8
+sha256=a41f6bd38f9ebce1f21b620f9ce7ea8ab3984fc2a633cffe18e33518e906d508
