@@ -130,3 +130,80 @@ async def test_legacy_print_complete_reprints_do_not_collide_on_filename_key():
         (42, 2.0, {"source_event_key": None}),
         (42, 2.0, {"source_event_key": None}),
     ]
+
+
+@pytest.mark.asyncio
+async def test_report_consumption_db_uses_eager_service_loader(monkeypatch):
+    """Regression: WebSocket consumption must not lazy-load Spool.status.
+
+    The physical X2D test exposed SQLAlchemy MissingGreenlet because the driver
+    used AsyncSession.get(Spool) and SpoolService.record_consumption later read
+    spool.status. The driver must load through SpoolService.get_spool(), whose
+    query eagerly loads status/filament relationships.
+    """
+    driver = object.__new__(Driver)
+    sentinel_spool = object()
+    calls = []
+
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *args):
+            return None
+        async def get(self, *args, **kwargs):
+            raise AssertionError("raw AsyncSession.get(Spool) must not be used")
+
+    class FakeSessionFactory:
+        def __call__(self):
+            return FakeSession()
+
+    class FakeService:
+        def __init__(self, db):
+            self.db = db
+        async def get_spool(self, spool_id):
+            calls.append(("get", spool_id))
+            return sentinel_spool
+        async def record_consumption(self, **kwargs):
+            calls.append(("record", kwargs))
+            return object(), 275.0
+
+    import app.plugins.bambuddy.driver as driver_module
+    monkeypatch.setattr(driver_module, "async_session_maker", FakeSessionFactory())
+    monkeypatch.setattr(driver_module, "SpoolService", FakeService)
+
+    await driver._report_consumption_db(
+        5, 5.0, source_event_key="run-physical:5:0:1"
+    )
+
+    assert calls[0] == ("get", 5)
+    assert calls[1][0] == "record"
+    assert calls[1][1]["spool"] is sentinel_spool
+    assert calls[1][1]["source_event_key"] == "run-physical:5:0:1"
+
+
+@pytest.mark.asyncio
+async def test_report_consumption_retries_with_same_idempotency_key(monkeypatch):
+    driver = object.__new__(Driver)
+    attempts = []
+
+    async def flaky(spool_id, grams, *, source_event_key=None):
+        attempts.append((spool_id, grams, source_event_key))
+        if len(attempts) < 3:
+            raise RuntimeError("temporary write failure")
+
+    driver._report_consumption_db = flaky
+    monkeypatch.setattr("app.plugins.bambuddy.driver.asyncio.sleep", _no_sleep)
+
+    await driver._report_consumption(
+        5, 5.0, source_event_key="stable-run:17:0:1"
+    )
+
+    assert attempts == [
+        (5, 5.0, "stable-run:17:0:1"),
+        (5, 5.0, "stable-run:17:0:1"),
+        (5, 5.0, "stable-run:17:0:1"),
+    ]
+
+
+async def _no_sleep(_delay):
+    return None
