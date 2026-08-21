@@ -1,6 +1,8 @@
 name: X2D external tray normalization
 
 on:
+  push:
+    branches: [fix/x2d-external-trays]
   pull_request:
     branches: [feat/bambuddy-inventory-only]
 
@@ -26,24 +28,26 @@ jobs:
           import_anchor = 'from .profile_variants import ('
           if import_anchor not in text:
               raise SystemExit('driver import anchor not found')
-          text = text.replace(
-              import_anchor,
-              'from .external_slots import canonical_external_tray_id, external_slot_index\n\n' + import_anchor,
-              1,
-          )
+          if 'from .external_slots import canonical_external_tray_id, external_slot_index' not in text:
+              text = text.replace(
+                  import_anchor,
+                  'from .external_slots import canonical_external_tray_id, external_slot_index\n\n' + import_anchor,
+                  1,
+              )
 
           old_idx = '            vt_idx = f"255-{vt_id}"'
-          if text.count(old_idx) != 2:
-              raise SystemExit(f'expected 2 external slot-index anchors, found {text.count(old_idx)}')
+          if text.count(old_idx) != 1:
+              raise SystemExit(f'expected 1 external slot-index anchor, found {text.count(old_idx)}')
           text = text.replace(
               old_idx,
               '            vt_tray_id = canonical_external_tray_id(vt_id)\n'
               '            vt_idx = external_slot_index(vt_id)',
+              1,
           )
 
           old_call = '255, vt_id'
-          if text.count(old_call) != 6:
-              raise SystemExit(f'expected 6 external assignment calls, found {text.count(old_call)}')
+          if text.count(old_call) != 3:
+              raise SystemExit(f'expected 3 external assignment calls, found {text.count(old_call)}')
           text = text.replace(old_call, '255, vt_tray_id')
           path.write_text(text)
           PY
@@ -57,6 +61,7 @@ jobs:
         run: pytest -q tests/test_external_slots.py
 
       - name: Commit validated product change and remove temporary workflow
+        if: github.event_name == 'pull_request'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
