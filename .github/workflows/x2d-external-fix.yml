@@ -58,7 +58,7 @@ jobs:
           pip install pytest
 
       - name: Run focused pure tests
-        run: pytest -q tests/test_external_slots.py
+        run: PYTHONPATH="$PWD" python -m pytest -q tests/test_external_slots.py
 
       - name: Commit validated product change and remove temporary workflow
         if: github.event_name == 'pull_request'
