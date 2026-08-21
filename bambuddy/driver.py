@@ -4159,13 +4159,18 @@ class Driver(BaseDriver):
     ) -> None:
         """Meldet Verbrauch direkt über SpoolService in FilaMan-DB."""
         async with async_session_maker() as db:
-            spool = await db.get(Spool, filaman_spool_id)
+            service = SpoolService(db)
+            # Do not use db.get(Spool) here. record_consumption() may inspect
+            # spool.status for the automatic new→opened transition; an unloaded
+            # relationship would lazy-load from the WebSocket background task and
+            # raises SQLAlchemy MissingGreenlet. SpoolService.get_spool() eagerly
+            # loads the relationships its write methods require.
+            spool = await service.get_spool(filaman_spool_id)
             if not spool:
                 logger.warning(
                     f"FilaMan spool {filaman_spool_id} not found for consumption report"
                 )
                 return
-            service = SpoolService(db)
             _, remaining = await service.record_consumption(
                 spool=spool,
                 delta_weight_g=delta_g,
@@ -5116,10 +5121,32 @@ class Driver(BaseDriver):
     async def _report_consumption(
         self, filaman_spool_id: int, delta_g: float, *, source_event_key: str | None = None
     ) -> None:
-        try:
-            await self._report_consumption_db(filaman_spool_id, delta_g, source_event_key=source_event_key)
-        except Exception as e:
-            logger.warning(f"Failed to report consumption for FilaMan spool {filaman_spool_id}: {e}")
+        # Consumption is the one write we must not silently lose. Retry with a
+        # fresh AsyncSession while preserving the same source_event_key so a
+        # successful first attempt followed by a transport/task failure cannot
+        # double-debit the spool.
+        last_error: Exception | None = None
+        for attempt in range(1, 4):
+            try:
+                await self._report_consumption_db(
+                    filaman_spool_id, delta_g, source_event_key=source_event_key
+                )
+                return
+            except Exception as e:
+                last_error = e
+                logger.warning(
+                    "Consumption write attempt %d/3 failed for FilaMan spool %s: %s",
+                    attempt,
+                    filaman_spool_id,
+                    e,
+                )
+                if attempt < 3:
+                    await asyncio.sleep(0.25 * attempt)
+        logger.error(
+            "Failed to report consumption for FilaMan spool %s after 3 attempts: %s",
+            filaman_spool_id,
+            last_error,
+        )
 
     # -- Tray-Konfiguration (FilaMan → Bambuddy) ------------------------------
 

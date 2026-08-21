@@ -48,6 +48,6 @@ def test_sync_actions_expose_ru_uk_labels():
     assert '"labelByLocale": {"ru": "Полная пересинхронизация", "uk": "Повна повторна синхронізація"}' in source
 
 
-def test_manifest_version_is_1_3_9():
+def test_manifest_version_is_1_3_10():
     manifest = json.loads(Path(__file__).resolve().parents[1].joinpath("bambuddy", "plugin.json").read_text(encoding="utf-8"))
-    assert manifest["version"] == "1.3.9"
+    assert manifest["version"] == "1.3.10"
