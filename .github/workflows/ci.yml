@@ -21,7 +21,7 @@ on:
       - ".github/workflows/ci.yml"
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   tests:
@@ -29,76 +29,6 @@ jobs:
     steps:
       - name: Checkout plugin
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Apply audited X2D 1.3.9 hotfix
-        if: github.ref_name == 'fix/x2d-external-slot-canonical-1.3.9'
-        shell: bash
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-          import json
-
-          driver = Path('bambuddy/driver.py')
-          text = driver.read_text(encoding='utf-8')
-
-          replacements = [
-              (
-                  'snap[f"255-{vt_id}"] = self._tray_snapshot(vt)',
-                  'snap[external_slot_index(vt_id)] = self._tray_snapshot(vt)',
-              ),
-              (
-                  '"label": "Sync Now",\n                    "label_de": "Jetzt synchronisieren",',
-                  '"label": "Sync Now",\n                    "labelByLocale": {"ru": "Синхронизировать", "uk": "Синхронізувати"},\n                    "label_de": "Jetzt synchronisieren",',
-              ),
-              (
-                  '"label": "Full Resync",\n                    "label_de": "Vollständiger Resync",',
-                  '"label": "Full Resync",\n                    "labelByLocale": {"ru": "Полная пересинхронизация", "uk": "Повна повторна синхронізація"},\n                    "label_de": "Vollständiger Resync",',
-              ),
-              (
-                  'fallback_key = event_id or f"legacy:{self._bambuddy_printer_id}:{data.get(\'subtask_name\') or data.get(\'filename\') or \'unknown\'}"',
-                  'fallback_key: str | None = None\n        logger.warning("Legacy print_complete has no stable run identity; recording without a persistent idempotency key")',
-              ),
-              (
-                  'source_event_key=f"{fallback_key}:{slot_key}"',
-                  'source_event_key=(f"{fallback_key}:{slot_key}" if fallback_key else None)',
-              ),
-              (
-                  'key = f"{event_id or \'legacy\'}:{bb_id}:{ams_id if ams_id is not None else \'\'}:{tray_id if tray_id is not None else \'\'}"',
-                  'key = (\n                f"{event_id}:{bb_id}:{ams_id if ams_id is not None else \'\'}:{tray_id if tray_id is not None else \'\'}"\n                if event_id\n                else None\n            )\n            if not event_id:\n                logger.warning("spool_usage_logged has no stable event_id; recording usage without a persistent idempotency key")',
-              ),
-          ]
-          for old, new in replacements:
-              count = text.count(old)
-              if count != 1:
-                  raise SystemExit(f'expected exactly one occurrence for hotfix target, got {count}: {old[:80]!r}')
-              text = text.replace(old, new, 1)
-          driver.write_text(text, encoding='utf-8')
-
-          manifest_path = Path('bambuddy/plugin.json')
-          manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
-          if manifest.get('version') != '1.3.8':
-              raise SystemExit(f"expected plugin 1.3.8, got {manifest.get('version')}")
-          manifest['version'] = '1.3.9'
-          manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
-
-          ext = Path('tests/test_external_slots.py')
-          ext_text = ext.read_text(encoding='utf-8')
-          ext_add = '''\n\ndef test_pending_snapshot_uses_canonical_external_slot_ids():\n    source = Path(__file__).resolve().parents[1].joinpath("bambuddy", "driver.py").read_text(encoding="utf-8")\n    start = source.index("async def _capture_pending_snapshot")\n    tail = source[start:]\n    end = tail.find("\\n    async def ", 1)\n    method = tail if end < 0 else tail[:end]\n    assert "snap[external_slot_index(vt_id)]" in method\n    assert 'snap[f"255-{vt_id}"]' not in method\n\n\ndef test_sync_actions_expose_ru_uk_labels():\n    source = Path(__file__).resolve().parents[1].joinpath("bambuddy", "driver.py").read_text(encoding="utf-8")\n    assert '\"labelByLocale\": {\"ru\": \"Синхронизировать\", \"uk\": \"Синхронізувати\"}' in source\n    assert '\"labelByLocale\": {\"ru\": \"Полная пересинхронизация\", \"uk\": \"Повна повторна синхронізація\"}' in source\n\n\ndef test_manifest_version_is_1_3_9():\n    manifest = json.loads(Path(__file__).resolve().parents[1].joinpath("bambuddy", "plugin.json").read_text(encoding="utf-8"))\n    assert manifest["version"] == "1.3.9"\n'''
-          if 'test_pending_snapshot_uses_canonical_external_slot_ids' not in ext_text:
-              if 'import json\n' not in ext_text:
-                  ext_text = ext_text.replace('import importlib.util\n', 'import importlib.util\nimport json\n', 1)
-              ext_text += ext_add
-              ext.write_text(ext_text, encoding='utf-8')
-
-          cons = Path('tests/test_consumption_protocol.py')
-          cons_text = cons.read_text(encoding='utf-8')
-          cons_add = '''\n\n@pytest.mark.asyncio\nasync def test_modern_usage_without_event_id_does_not_create_permanent_legacy_key():\n    driver = object.__new__(Driver)\n    driver._bambuddy_printer_id = 3\n    driver.printer_id = 7\n    driver._spoolman_enabled = False\n    driver._slot_to_filaman_spool = {}\n    calls = []\n    driver._resolve_bambuddy_spool_id = lambda spool_id: _resolved(42, spool_id)\n    driver._report_consumption = lambda spool, grams, **kw: _record(calls, spool, grams, kw)\n\n    event = {\n        "type": "spool_usage_logged",\n        "printer_id": 3,\n        "usage": [{"spool_id": 17, "weight_used": 1.5, "ams_id": 0, "tray_id": 2}],\n    }\n    await driver._handle_spool_usage_logged(event)\n    await driver._handle_spool_usage_logged(event)\n\n    assert calls == [\n        (42, 1.5, {"source_event_key": None}),\n        (42, 1.5, {"source_event_key": None}),\n    ]\n\n\n@pytest.mark.asyncio\nasync def test_legacy_print_complete_reprints_do_not_collide_on_filename_key():\n    driver = object.__new__(Driver)\n    driver._bambuddy_printer_id = 3\n    driver._spoolman_enabled = False\n    driver._slot_to_filaman_spool = {"0-0": 42}\n    calls = []\n    driver._report_consumption = lambda spool, grams, **kw: _record(calls, spool, grams, kw)\n\n    payload = {"weight_used": 2.0, "filename": "same-file.3mf"}\n    await driver._handle_print_complete(payload, event_id="")\n    await driver._handle_print_complete(payload, event_id="")\n\n    assert calls == [\n        (42, 2.0, {"source_event_key": None}),\n        (42, 2.0, {"source_event_key": None}),\n    ]\n'''
-          if 'test_modern_usage_without_event_id_does_not_create_permanent_legacy_key' not in cons_text:
-              cons_text += cons_add
-              cons.write_text(cons_text, encoding='utf-8')
-          PY
 
       - name: Checkout FilaMan runtime
         uses: actions/checkout@v4
@@ -150,17 +80,3 @@ jobs:
         env:
           PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/bambuddy:${{ github.workspace }}/filaman-system/backend
         run: uv run pytest "$GITHUB_WORKSPACE/tests" -q
-
-      - name: Compile plugin
-        run: python -m compileall -q bambuddy
-
-      - name: Commit validated product changes
-        if: github.ref_name == 'fix/x2d-external-slot-canonical-1.3.9'
-        shell: bash
-        run: |
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add bambuddy/driver.py bambuddy/plugin.json tests/test_external_slots.py tests/test_consumption_protocol.py
-          git diff --cached --quiet && exit 0
-          git commit -m 'fix: harden X2D slots and consumption identity'
-          git push origin HEAD:fix/x2d-external-slot-canonical-1.3.9
