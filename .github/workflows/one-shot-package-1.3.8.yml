@@ -1,0 +1,81 @@
+name: One-shot package Bambuddy plugin 1.3.8
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/one-shot-package-1.3.8.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: release/plugin-1.3.8-package
+          fetch-depth: 0
+
+      - name: Verify release source is unchanged
+        run: |
+          test "$(python -c 'import json; print(json.load(open("bambuddy/plugin.json"))["version"])')" = "1.3.8"
+          git diff --quiet c2c1ad390e6a7f64174185802a6408d884318083 -- bambuddy tests .github/workflows/ci.yml
+
+      - name: Build deterministic install ZIP and checksum
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib
+          import json
+          import zipfile
+
+          source_sha = 'c2c1ad390e6a7f64174185802a6408d884318083'
+          root = Path('bambuddy')
+          manifest = json.loads((root / 'plugin.json').read_text())
+          assert manifest['plugin_key'] == 'bambuddy'
+          assert manifest['version'] == '1.3.8'
+
+          dist = Path('dist')
+          dist.mkdir(exist_ok=True)
+          zip_path = dist / 'bambuddy-1.3.8.zip'
+          fixed_time = (1980, 1, 1, 0, 0, 0)
+          with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
+              for path in sorted(p for p in root.rglob('*') if p.is_file()):
+                  rel = Path('bambuddy') / path.relative_to(root)
+                  info = zipfile.ZipInfo(str(rel).replace('\\', '/'), fixed_time)
+                  info.compress_type = zipfile.ZIP_DEFLATED
+                  info.external_attr = 0o644 << 16
+                  zf.writestr(info, path.read_bytes(), compress_type=zipfile.ZIP_DEFLATED, compresslevel=9)
+
+          digest = hashlib.sha256(zip_path.read_bytes()).hexdigest()
+          (dist / 'bambuddy-1.3.8.sha256').write_text(f'{digest}  bambuddy-1.3.8.zip\n')
+          (dist / 'bambuddy-1.3.8.source.txt').write_text(
+              f'source_commit={source_sha}\nplugin_key=bambuddy\nversion=1.3.8\nsha256={digest}\n'
+          )
+          print(digest)
+          PY
+
+      - name: Validate archive layout
+        run: |
+          python - <<'PY'
+          import json, zipfile
+          p='dist/bambuddy-1.3.8.zip'
+          with zipfile.ZipFile(p) as z:
+              bad=z.testzip(); assert bad is None, bad
+              names=z.namelist()
+              assert names and all(n.startswith('bambuddy/') for n in names)
+              manifest=json.loads(z.read('bambuddy/plugin.json'))
+              assert manifest['plugin_key']=='bambuddy'
+              assert manifest['version']=='1.3.8'
+          PY
+
+      - name: Commit immutable package and remove one-shot workflow
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/one-shot-package-1.3.8.yml
+          git add dist/bambuddy-1.3.8.zip dist/bambuddy-1.3.8.sha256 dist/bambuddy-1.3.8.source.txt
+          git commit -m "release: package Bambuddy plugin 1.3.8"
+          git push origin HEAD:release/plugin-1.3.8-package
