@@ -3,8 +3,8 @@
   "name": "Bambuddy",
   "driver_key": "bambuddy",
   "plugin_type": "driver",
-  "version": "1.3.4",
-  "description": "Connects to printers managed by Bambuddy. Receives real-time AMS slot data via WebSocket and supports manual and automatic spool assignment.",
+  "version": "1.3.8",
+  "description": "Connects to printers managed by Bambuddy. Receives real-time AMS data and idempotent modern spool usage events via WebSocket, with legacy print completion compatibility.",
   "author": "FilaMan",
   "homepage": "https://www.filaman.app",
   "dependencies": ["websockets>=12.0", "httpx>=0.27.0"],
@@ -13,38 +13,127 @@
     "properties": {
       "sync_enabled": {
         "type": "string",
-        "title": "Inventar-Synchronisation",
-        "description": "Wenn aktiviert, werden FilaMan-Spulen automatisch ins Bambuddy-Inventar synchronisiert. Bei Deaktivierung nutzt Bambuddy die Spoolman API.",
+        "title": "Inventory Synchronization",
+        "titleByLocale": {
+          "en": "Inventory Synchronization",
+          "ru": "Синхронизация инвентаря",
+          "uk": "Синхронізація інвентарю"
+        },
+        "description": "When enabled, FilaMan spools are synchronized automatically with Bambuddy inventory. When disabled, Bambuddy uses the Spoolman API.",
+        "descriptionByLocale": {
+          "en": "When enabled, FilaMan spools are synchronized automatically with Bambuddy inventory. When disabled, Bambuddy uses the Spoolman API.",
+          "ru": "При включении катушки FilaMan автоматически синхронизируются с инвентарём Bambuddy. При отключении Bambuddy использует Spoolman API.",
+          "uk": "Коли ввімкнено, котушки FilaMan автоматично синхронізуються з інвентарем Bambuddy. Коли вимкнено, Bambuddy використовує Spoolman API."
+        },
         "enum": ["enabled", "disabled"],
+        "enumNames": ["Enabled", "Disabled"],
+        "enumNamesByLocale": {
+          "en": ["Enabled", "Disabled"],
+          "ru": ["Включено", "Отключено"],
+          "uk": ["Увімкнено", "Вимкнено"]
+        },
         "default": "enabled"
+      },
+      "printer_write_mode": {
+        "type": "string",
+        "title": "Printer Write Mode",
+        "titleByLocale": {
+          "en": "Printer Write Mode",
+          "ru": "Режим записи в принтер",
+          "uk": "Режим запису в принтер"
+        },
+        "description": "Full applies filament and calibration settings to the printer. Inventory only keeps Bambuddy inventory and assignment state without writing material settings to the printer.",
+        "descriptionByLocale": {
+          "en": "Full applies filament and calibration settings to the printer. Inventory only keeps Bambuddy inventory and assignment state without writing material settings to the printer.",
+          "ru": "Полный режим применяет настройки филамента и калибровки к принтеру. Режим «Только инвентарь» сохраняет инвентарь и назначения Bambuddy, не записывая настройки материала в принтер.",
+          "uk": "Повний режим застосовує налаштування філаменту та калібрування до принтера. Режим «Лише інвентар» зберігає інвентар і призначення Bambuddy без запису налаштувань матеріалу в принтер."
+        },
+        "enum": ["full", "inventory_only"],
+        "enumNames": ["Full", "Inventory only"],
+        "enumNamesByLocale": {
+          "en": ["Full", "Inventory only"],
+          "ru": ["Полный режим", "Только инвентарь"],
+          "uk": ["Повний режим", "Лише інвентар"]
+        },
+        "default": "full"
       },
       "bambuddy_url": {
         "type": "string",
         "title": "Bambuddy URL",
-        "description": "Base URL of your Bambuddy instance, e.g. http://192.168.1.50:8080"
+        "titleByLocale": {
+          "en": "Bambuddy URL",
+          "ru": "URL Bambuddy",
+          "uk": "URL Bambuddy"
+        },
+        "description": "Base URL of your Bambuddy instance, for example http://192.168.1.50:8080.",
+        "descriptionByLocale": {
+          "en": "Base URL of your Bambuddy instance, for example http://192.168.1.50:8080.",
+          "ru": "Базовый URL экземпляра Bambuddy, например http://192.168.1.50:8080.",
+          "uk": "Базовий URL екземпляра Bambuddy, наприклад http://192.168.1.50:8080."
+        }
       },
       "api_key": {
         "type": "string",
         "title": "API Key",
-        "description": "Bambuddy API key (create in Bambuddy under Settings → API Keys)"
+        "titleByLocale": {
+          "en": "API Key",
+          "ru": "API-ключ",
+          "uk": "API-ключ"
+        },
+        "description": "Bambuddy API key. Create it in Bambuddy under Settings → API Keys.",
+        "descriptionByLocale": {
+          "en": "Bambuddy API key. Create it in Bambuddy under Settings → API Keys.",
+          "ru": "API-ключ Bambuddy. Создайте его в Bambuddy: Настройки → API Keys.",
+          "uk": "API-ключ Bambuddy. Створіть його в Bambuddy: Налаштування → API Keys."
+        }
       },
       "printer_id": {
         "type": "integer",
         "title": "Bambuddy Printer ID",
-        "description": "Internal ID of the printer in Bambuddy"
+        "titleByLocale": {
+          "en": "Bambuddy Printer ID",
+          "ru": "ID принтера в Bambuddy",
+          "uk": "ID принтера в Bambuddy"
+        },
+        "description": "Internal ID of the printer in Bambuddy.",
+        "descriptionByLocale": {
+          "en": "Internal ID of the printer in Bambuddy.",
+          "ru": "Внутренний идентификатор принтера в Bambuddy.",
+          "uk": "Внутрішній ідентифікатор принтера в Bambuddy."
+        }
       },
       "reconnect_interval_seconds": {
         "type": "integer",
         "title": "WebSocket Reconnect Interval (Seconds)",
-        "description": "How long to wait before reconnecting after a WebSocket disconnect",
+        "titleByLocale": {
+          "en": "WebSocket Reconnect Interval (Seconds)",
+          "ru": "Интервал переподключения WebSocket (сек.)",
+          "uk": "Інтервал перепідключення WebSocket (с)"
+        },
+        "description": "How long to wait before reconnecting after a WebSocket disconnect.",
+        "descriptionByLocale": {
+          "en": "How long to wait before reconnecting after a WebSocket disconnect.",
+          "ru": "Сколько ждать перед повторным подключением после разрыва WebSocket.",
+          "uk": "Скільки чекати перед повторним підключенням після розриву WebSocket."
+        },
         "default": 30,
         "minimum": 5,
         "maximum": 300
       },
       "sync_interval_seconds": {
         "type": "integer",
-        "title": "Sync-Intervall (Sekunden)",
-        "description": "Wie oft FilaMan-Spulen mit Bambuddy abgeglichen werden",
+        "title": "Synchronization Interval (Seconds)",
+        "titleByLocale": {
+          "en": "Synchronization Interval (Seconds)",
+          "ru": "Интервал синхронизации (сек.)",
+          "uk": "Інтервал синхронізації (с)"
+        },
+        "description": "How often FilaMan spools are synchronized with Bambuddy.",
+        "descriptionByLocale": {
+          "en": "How often FilaMan spools are synchronized with Bambuddy.",
+          "ru": "Как часто катушки FilaMan синхронизируются с Bambuddy.",
+          "uk": "Як часто котушки FilaMan синхронізуються з Bambuddy."
+        },
         "default": 3600,
         "minimum": 60,
         "maximum": 86400
@@ -52,15 +141,47 @@
       "per_model_profiles": {
         "type": "string",
         "title": "Per-Model Slicer Profiles",
-        "description": "When enabled, cloud profiles are stored per printer model (P2S, H2C, etc.) with automatic nozzle resolution. Disable to fall back to single-profile behavior.",
+        "titleByLocale": {
+          "en": "Per-Model Slicer Profiles",
+          "ru": "Профили слайсера для каждой модели",
+          "uk": "Профілі слайсера для кожної моделі"
+        },
+        "description": "When enabled, cloud profiles are stored per printer model (P2S, H2C, X2D, etc.) with automatic nozzle resolution. Disable to use single-profile behavior.",
+        "descriptionByLocale": {
+          "en": "When enabled, cloud profiles are stored per printer model (P2S, H2C, X2D, etc.) with automatic nozzle resolution. Disable to use single-profile behavior.",
+          "ru": "При включении облачные профили хранятся отдельно для каждой модели принтера (P2S, H2C, X2D и т. д.) с автоматическим определением сопла. Отключите для использования одного профиля.",
+          "uk": "Коли ввімкнено, хмарні профілі зберігаються окремо для кожної моделі принтера (P2S, H2C, X2D тощо) з автоматичним визначенням сопла. Вимкніть для використання одного профілю."
+        },
         "enum": ["enabled", "disabled"],
+        "enumNames": ["Enabled", "Disabled"],
+        "enumNamesByLocale": {
+          "en": ["Enabled", "Disabled"],
+          "ru": ["Включено", "Отключено"],
+          "uk": ["Увімкнено", "Вимкнено"]
+        },
         "default": "enabled"
       },
       "per_printer_profiles": {
         "type": "string",
-        "title": "Per-Printer Slicer Profiles (legacy alias)",
-        "description": "Deprecated alias for per_model_profiles. When enabled, picking a cloud profile resolves and stores a separate printer/nozzle-specific variant (PFUS) per printer model, and the AMS configure call sends the correct profile as setting_id.",
+        "title": "Per-Printer Slicer Profiles (Legacy Alias)",
+        "titleByLocale": {
+          "en": "Per-Printer Slicer Profiles (Legacy Alias)",
+          "ru": "Профили слайсера для каждого принтера (устаревший параметр)",
+          "uk": "Профілі слайсера для кожного принтера (застарілий параметр)"
+        },
+        "description": "Deprecated alias for per_model_profiles. Kept only for backward compatibility.",
+        "descriptionByLocale": {
+          "en": "Deprecated alias for per_model_profiles. Kept only for backward compatibility.",
+          "ru": "Устаревший псевдоним per_model_profiles. Сохранён только для обратной совместимости.",
+          "uk": "Застарілий псевдонім per_model_profiles. Збережений лише для зворотної сумісності."
+        },
         "enum": ["enabled", "disabled"],
+        "enumNames": ["Enabled", "Disabled"],
+        "enumNamesByLocale": {
+          "en": ["Enabled", "Disabled"],
+          "ru": ["Включено", "Отключено"],
+          "uk": ["Увімкнено", "Вимкнено"]
+        },
         "default": "enabled"
       }
     },

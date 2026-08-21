@@ -1,0 +1,82 @@
+name: Plugin CI
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - 'feat/**'
+      - 'fix/**'
+      - 'ci/**'
+    paths:
+      - "bambuddy/**"
+      - "tests/**"
+      - ".github/workflows/ci.yml"
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "bambuddy/**"
+      - "tests/**"
+      - ".github/workflows/ci.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout plugin
+        uses: actions/checkout@v4
+
+      - name: Checkout FilaMan runtime
+        uses: actions/checkout@v4
+        with:
+          repository: MikeFox303/filaman-system
+          ref: main
+          path: filaman-system
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install locked FilaMan dependencies
+        working-directory: filaman-system/backend
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install uv
+          uv sync --frozen --extra dev
+
+      - name: Install plugin into FilaMan runtime
+        run: |
+          mkdir -p filaman-system/backend/app/plugins/bambuddy
+          cp -a bambuddy/. filaman-system/backend/app/plugins/bambuddy/
+
+      - name: Validate plugin manifest
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          manifest = json.loads(Path('bambuddy/plugin.json').read_text())
+          assert manifest['plugin_key'] == 'bambuddy'
+          assert manifest['driver_key'] == 'bambuddy'
+          assert manifest['version']
+          props = manifest['config_schema']['properties']
+          for key, prop in props.items():
+              if 'titleByLocale' in prop:
+                  assert {'en', 'ru', 'uk'} <= set(prop['titleByLocale']), key
+              if 'descriptionByLocale' in prop:
+                  assert {'en', 'ru', 'uk'} <= set(prop['descriptionByLocale']), key
+              if 'enumNamesByLocale' in prop:
+                  enum_len = len(prop.get('enum', []))
+                  assert all(len(labels) == enum_len for labels in prop['enumNamesByLocale'].values()), key
+          PY
+
+      - name: Run full plugin test suite
+        working-directory: filaman-system/backend
+        env:
+          PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/bambuddy:${{ github.workspace }}/filaman-system/backend
+        run: uv run pytest "$GITHUB_WORKSPACE/tests" -q
