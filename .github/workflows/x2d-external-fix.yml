@@ -46,8 +46,8 @@ jobs:
           )
 
           old_call = '255, vt_id'
-          if text.count(old_call) != 3:
-              raise SystemExit(f'expected 3 external assignment calls, found {text.count(old_call)}')
+          if text.count(old_call) != 4:
+              raise SystemExit(f'expected 4 external assignment calls, found {text.count(old_call)}')
           text = text.replace(old_call, '255, vt_tray_id')
           path.write_text(text)
           PY
