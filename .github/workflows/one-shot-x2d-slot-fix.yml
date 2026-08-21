@@ -1,4 +1,5 @@
 name: One-shot X2D external slot fix
+# Retriggered after live X2D duplicate-slot audit.
 
 on:
   push:
