@@ -1,0 +1,140 @@
+name: Guarded upstream sync
+
+on:
+  schedule:
+    - cron: '57 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+  actions: write
+
+concurrency:
+  group: guarded-upstream-sync
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: Fire-Devils/filaman-bambuddy-plugin
+  SYNC_BRANCH: sync/upstream
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout protected main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Merge current upstream into a guarded tree
+        id: merge
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          local_version="$(python -c 'import json; print(json.load(open("bambuddy/plugin.json"))["version"])')"
+          echo "local_version=${local_version}" >> "$GITHUB_OUTPUT"
+
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+          git fetch upstream main --tags
+          upstream_sha="$(git rev-parse upstream/main)"
+          echo "upstream_sha=${upstream_sha}" >> "$GITHUB_OUTPUT"
+
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if ! git merge --no-commit --no-ff upstream/main; then
+            git merge --abort || true
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "conflict=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          merged_version="$(python -c 'import json; print(json.load(open("bambuddy/plugin.json"))["version"])')"
+          python - "$local_version" "$merged_version" <<'PY'
+          import sys
+          def v(s):
+              return tuple(int(x) for x in s.split('-', 1)[0].split('.'))
+          local, merged = sys.argv[1:3]
+          if v(merged) < v(local):
+              raise SystemExit(f'refusing plugin downgrade: {local} -> {merged}')
+          PY
+
+          mapfile -t files < <(git diff --cached --name-only)
+          printf '%s\n' "${files[@]}" | tee /tmp/upstream-changed-files.txt
+          sensitive=false
+          for path in "${files[@]}"; do
+            case "$path" in
+              *.md|docs/*|LICENSE|LICENSE.*)
+                ;;
+              *)
+                sensitive=true
+                ;;
+            esac
+          done
+          echo "sensitive=${sensitive}" >> "$GITHUB_OUTPUT"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "conflict=false" >> "$GITHUB_OUTPUT"
+
+      - name: Report merge conflict
+        if: steps.merge.outputs.conflict == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_SHA: ${{ steps.merge.outputs.upstream_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          title="Bambuddy plugin upstream conflict: ${UPSTREAM_SHA}"
+          existing="$(gh issue list --state open --search "${title} in:title" --json number --jq '.[0].number // empty')"
+          if [[ -z "$existing" ]]; then
+            gh issue create --title "$title" --body "Guarded sync found conflicts against ${UPSTREAM_REPO}@${UPSTREAM_SHA}. Nothing was merged. Preserve source_event_key idempotency, MissingGreenlet-safe writes, X2D external slots, inventory_only and RU/UA localized action labels."
+          fi
+          exit 1
+
+      - name: Protected plugin invariants
+        if: steps.merge.outputs.changed == 'true' && steps.merge.outputs.conflict != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --cached --check
+          grep -Rqs 'source_event_key' bambuddy tests
+          grep -Rqs 'inventory_only' bambuddy tests
+          grep -Rqs 'labelByLocale' bambuddy tests
+          grep -Rqs '1000' bambuddy tests
+          grep -Rqs '1001' bambuddy tests
+          python -m compileall -q bambuddy
+
+      - name: Commit merged tree
+        if: steps.merge.outputs.changed == 'true' && steps.merge.outputs.conflict != 'true'
+        env:
+          UPSTREAM_SHA: ${{ steps.merge.outputs.upstream_sha }}
+        run: git commit -m "chore: sync upstream ${UPSTREAM_SHA}"
+
+      - name: Auto-advance documentation-only updates
+        if: steps.merge.outputs.changed == 'true' && steps.merge.outputs.conflict != 'true' && steps.merge.outputs.sensitive == 'false'
+        run: git push origin HEAD:main
+
+      - name: Publish code changes for semantic review
+        if: steps.merge.outputs.changed == 'true' && steps.merge.outputs.conflict != 'true' && steps.merge.outputs.sensitive == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_SHA: ${{ steps.merge.outputs.upstream_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin "$SYNC_BRANCH" || true
+          git push --force-with-lease origin "HEAD:${SYNC_BRANCH}"
+          existing="$(gh pr list --head "$SYNC_BRANCH" --base main --state open --json number --jq '.[0].number // empty')"
+          body="Guarded plugin update from ${UPSTREAM_REPO}@${UPSTREAM_SHA}. Code changed, so automatic merge is blocked. CI is dispatched explicitly. Do not merge if plugin version decreases or if source_event_key, X2D external mapping, inventory_only, async-safe consumption, RU/UA labels or managed-package compatibility regress."
+          if [[ -z "$existing" ]]; then
+            gh pr create --base main --head "$SYNC_BRANCH" --title 'chore: guarded plugin upstream sync' --body "$body"
+          else
+            gh pr edit "$existing" --body "$body"
+          fi
+          gh workflow run ci.yml --ref "$SYNC_BRANCH"
