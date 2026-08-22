@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime, timezone
 
 import pytest
 
@@ -17,42 +18,134 @@ def _driver():
 
 
 @pytest.mark.asyncio
-async def test_first_durable_contact_bootstraps_without_replaying_history():
+async def test_first_durable_contact_replays_prints_after_upgrade_boundary():
     driver = _driver()
+    boundary = datetime(2026, 8, 22, 11, 59, tzinfo=timezone.utc)
+    cursor = {"value": None}
     stored = []
+    legacy_states = []
     writes = []
 
     async def load_cursor():
-        return None
+        return cursor["value"]
 
-    async def fetch_page(after_id):
-        assert after_id == 0
+    async def load_legacy():
+        return False
+
+    async def ensure_boundary():
+        return boundary
+
+    async def fetch_page(after_id, *, bootstrap_before=None):
+        if after_id == 0:
+            assert bootstrap_before == boundary
+            # 70 is the last row before the durable protocol was enabled.
+            # Row 88 completed while services were restarting and must not be
+            # swallowed by first-run bootstrap.
+            return "supported", {
+                "latest_id": 88,
+                "bootstrap_id": 70,
+                "events": [{"usage_id": 1, "weight_used": 999.0}],
+            }
+        assert after_id == 70
+        assert bootstrap_before is None
         return "supported", {
             "latest_id": 88,
+            "bootstrap_id": None,
             "events": [
                 {
-                    "usage_id": 70,
+                    "usage_id": 88,
                     "filaman_spool_id": 42,
                     "weight_used": 12.0,
-                    "created_at": "2026-08-20T10:00:00",
+                    "created_at": "2026-08-22T12:00:00+00:00",
                 }
             ],
         }
 
     async def store_cursor(value):
         stored.append(value)
+        cursor["value"] = value
+
+    async def store_legacy(value):
+        legacy_states.append(value)
+
+    async def write(spool_id, grams, *, source_event_key, event_at):
+        writes.append((spool_id, grams, source_event_key, event_at.isoformat()))
+        return True
+
+    driver._load_usage_cursor = load_cursor
+    driver._load_usage_legacy_mode = load_legacy
+    driver._ensure_usage_bootstrap_at = ensure_boundary
+    driver._fetch_usage_page = fetch_page
+    driver._store_usage_cursor = store_cursor
+    driver._store_usage_legacy_mode = store_legacy
+    driver._write_durable_consumption = write
+
+    assert await driver._reconcile_usage_events() == "supported"
+    assert stored == [70, 88]
+    assert legacy_states == [False]
+    assert writes == [
+        (
+            42,
+            12.0,
+            "bambuddy:usage:3:88:20260822T120000.000000Z",
+            "2026-08-22T12:00:00+00:00",
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_upgrade_from_explicit_legacy_mode_skips_legacy_era_history():
+    driver = _driver()
+    cursor = {"value": None}
+    stored = []
+    legacy_states = []
+    writes = []
+
+    async def load_cursor():
+        return cursor["value"]
+
+    async def load_legacy():
+        return True
+
+    async def fetch_page(after_id, *, bootstrap_before=None):
+        assert bootstrap_before is None
+        if after_id == 0:
+            return "supported", {
+                "latest_id": 50,
+                "bootstrap_id": 20,
+                "events": [
+                    {
+                        "usage_id": 49,
+                        "filaman_spool_id": 42,
+                        "weight_used": 8.0,
+                        "created_at": "2026-08-22T11:00:00+00:00",
+                    }
+                ],
+            }
+        assert after_id == 50
+        return "supported", {"latest_id": 50, "bootstrap_id": None, "events": []}
+
+    async def store_cursor(value):
+        stored.append(value)
+        cursor["value"] = value
+
+    async def store_legacy(value):
+        legacy_states.append(value)
 
     async def write(*args, **kwargs):
         writes.append((args, kwargs))
         return True
 
     driver._load_usage_cursor = load_cursor
+    driver._load_usage_legacy_mode = load_legacy
     driver._fetch_usage_page = fetch_page
     driver._store_usage_cursor = store_cursor
+    driver._store_usage_legacy_mode = store_legacy
     driver._write_durable_consumption = write
 
     assert await driver._reconcile_usage_events() == "supported"
-    assert stored == [88]
+    assert stored == [50]
+    assert legacy_states == [False]
     assert writes == []
 
 
@@ -66,7 +159,8 @@ async def test_replay_acks_each_event_only_after_successful_write():
     async def load_cursor():
         return cursor["value"]
 
-    async def fetch_page(after_id):
+    async def fetch_page(after_id, *, bootstrap_before=None):
+        assert bootstrap_before is None
         assert after_id == 10
         return "supported", {
             "latest_id": 12,
@@ -117,7 +211,8 @@ async def test_failed_second_write_does_not_ack_past_first_event():
     async def load_cursor():
         return 20
 
-    async def fetch_page(_after_id):
+    async def fetch_page(_after_id, *, bootstrap_before=None):
+        assert bootstrap_before is None
         return "supported", {
             "latest_id": 22,
             "events": [
@@ -160,7 +255,8 @@ async def test_unmapped_event_blocks_cursor_instead_of_skipping_usage():
     async def load_cursor():
         return 30
 
-    async def fetch_page(_after_id):
+    async def fetch_page(_after_id, *, bootstrap_before=None):
+        assert bootstrap_before is None
         return "supported", {
             "latest_id": 31,
             "events": [
