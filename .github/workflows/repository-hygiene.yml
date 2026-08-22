@@ -1,0 +1,52 @@
+name: Repository Hygiene
+
+on:
+  schedule:
+    - cron: '33 5 * * 0'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: read
+
+concurrency:
+  group: repository-hygiene
+  cancel-in-progress: false
+
+jobs:
+  prune-merged-branches:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Delete only fully merged branches without open PRs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin --prune '+refs/heads/*:refs/remotes/origin/*'
+          mapfile -t open_heads < <(gh pr list --state open --limit 200 --json headRefName --jq '.[].headRefName')
+          is_open_pr_head() {
+            local candidate="$1"
+            local head
+            for head in "${open_heads[@]}"; do
+              [[ "$head" == "$candidate" ]] && return 0
+            done
+            return 1
+          }
+          mapfile -t merged < <(git for-each-ref --format='%(refname:short)' --merged=origin/main refs/remotes/origin/)
+          for ref in "${merged[@]}"; do
+            [[ "$ref" == origin/HEAD ]] && continue
+            branch="${ref#origin/}"
+            case "$branch" in
+              main|dev|devel|sync/upstream) continue ;;
+            esac
+            is_open_pr_head "$branch" && continue
+            echo "Deleting fully merged branch: $branch"
+            git push origin --delete "$branch"
+          done
