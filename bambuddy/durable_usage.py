@@ -1,9 +1,9 @@
 """Durable Bambuddy → FilaMan consumption delivery.
 
 WebSocket ``spool_usage_logged`` remains the low-latency wake-up signal, but
-Bambuddy's persisted ``spool_usage_history`` is the source of truth.  This
-mixin reconciles that ledger with a per-printer cursor stored in FilaMan and
-advances the cursor only after the local idempotent consumption write commits.
+Bambuddy's persisted ``spool_usage_history`` is the source of truth. This mixin
+reconciles that ledger with a per-printer cursor stored in FilaMan and advances
+the cursor only after the local idempotent consumption write commits.
 
 Delivery semantics are therefore at-least-once, while FilaMan's
 ``source_event_key`` makes the debit effectively exactly-once.
@@ -27,6 +27,8 @@ from app.services.spool_service import SpoolService
 logger = logging.getLogger(__name__)
 
 _CURSOR_FIELD = "bambuddy_usage_cursors"
+_BOOTSTRAP_FIELD = "bambuddy_usage_bootstrap_at"
+_LEGACY_FIELD = "bambuddy_usage_legacy_mode"
 _REPLAY_INTERVAL_SECONDS = 60.0
 _CAPABILITY_RETRY_SECONDS = 300.0
 _PAGE_SIZE = 200
@@ -40,17 +42,25 @@ class DurableUsageMixin:
         self._usage_replay_task: asyncio.Task | None = None
         self._usage_reconcile_lock = asyncio.Lock()
         # None = not probed yet; True = durable endpoint available; False =
-        # confirmed old/unsupported Bambuddy.  A transient HTTP failure never
+        # confirmed old/unsupported Bambuddy. A transient HTTP failure never
         # flips this to False.
         self._usage_ledger_supported: bool | None = None
         self._usage_ledger_retry_at: float = 0.0
-        # Legacy direct WebSocket debit is allowed only before this FilaMan
-        # printer has ever bootstrapped a durable cursor. Once a cursor exists,
-        # mixing legacy event_id keys with durable usage-id keys could double
-        # charge the same physical print after a later replay.
+        # Legacy direct WebSocket debit is allowed only while an explicitly old
+        # Bambuddy is detected and no durable cursor exists.
         self._usage_legacy_allowed: bool = False
 
     async def start(self) -> None:
+        # Persist the migration boundary before the base driver starts its
+        # WebSocket. If Bambuddy is temporarily unavailable during this restart,
+        # a print that completes meanwhile is still newer than this boundary and
+        # can be replayed later instead of being swallowed by first-run bootstrap.
+        try:
+            if await self._load_usage_cursor() is None:
+                await self._ensure_usage_bootstrap_at()
+        except Exception as exc:
+            logger.warning("Could not persist durable usage bootstrap boundary: %s", exc)
+
         await super().start()
         if getattr(self, "_spoolman_enabled", False):
             return
@@ -74,56 +84,97 @@ class DurableUsageMixin:
         await super().stop()
 
     # ------------------------------------------------------------------
-    # Persistent cursor
+    # Persistent replay metadata
     # ------------------------------------------------------------------
 
     def _usage_cursor_key(self) -> str:
         return str(getattr(self, "_bambuddy_printer_id", "") or "")
 
-    async def _load_usage_cursor(self) -> int | None:
-        """Read this Bambuddy printer's last acknowledged durable usage ID."""
+    async def _load_usage_custom_map(self, field: str) -> dict:
         printer_id = getattr(self, "printer_id", None)
         if not printer_id:
-            return None
+            return {}
         async with async_session_maker() as db:
             printer = await db.get(Printer, int(printer_id))
             if printer is None:
-                return None
+                return {}
             custom_fields = dict(printer.custom_fields or {})
-            cursors = custom_fields.get(_CURSOR_FIELD)
-            if not isinstance(cursors, dict):
-                return None
-            raw = cursors.get(self._usage_cursor_key())
-            try:
-                value = int(raw)
-            except (TypeError, ValueError):
-                return None
-            return value if value >= 0 else None
+            raw = custom_fields.get(field)
+            return dict(raw) if isinstance(raw, dict) else {}
+
+    async def _store_usage_custom_value(self, field: str, value: Any) -> None:
+        printer_id = getattr(self, "printer_id", None)
+        if not printer_id:
+            raise RuntimeError("FilaMan printer_id is unavailable for durable usage state")
+        async with async_session_maker() as db:
+            printer = await db.get(Printer, int(printer_id))
+            if printer is None:
+                raise RuntimeError(f"FilaMan printer {printer_id} not found for durable usage state")
+            custom_fields = dict(printer.custom_fields or {})
+            raw_map = custom_fields.get(field)
+            values = dict(raw_map) if isinstance(raw_map, dict) else {}
+            values[self._usage_cursor_key()] = value
+            custom_fields[field] = values
+            # Assign a fresh object so SQLAlchemy JSON tracking does not depend
+            # on MutableDict instrumentation.
+            printer.custom_fields = custom_fields
+            await db.commit()
+
+    async def _load_usage_cursor(self) -> int | None:
+        """Read this Bambuddy printer's last acknowledged durable usage ID."""
+        values = await self._load_usage_custom_map(_CURSOR_FIELD)
+        raw = values.get(self._usage_cursor_key())
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            return None
+        return value if value >= 0 else None
 
     async def _store_usage_cursor(self, cursor: int) -> None:
         """Persist an ACK cursor only after a local debit has committed."""
-        printer_id = getattr(self, "printer_id", None)
-        if not printer_id:
-            raise RuntimeError("FilaMan printer_id is unavailable for usage cursor")
-        async with async_session_maker() as db:
-            printer = await db.get(Printer, int(printer_id))
-            if printer is None:
-                raise RuntimeError(f"FilaMan printer {printer_id} not found for usage cursor")
-            custom_fields = dict(printer.custom_fields or {})
-            raw_cursors = custom_fields.get(_CURSOR_FIELD)
-            cursors = dict(raw_cursors) if isinstance(raw_cursors, dict) else {}
-            cursors[self._usage_cursor_key()] = int(cursor)
-            custom_fields[_CURSOR_FIELD] = cursors
-            # Assign a fresh object so SQLAlchemy's JSON change tracking does
-            # not depend on MutableDict instrumentation.
-            printer.custom_fields = custom_fields
-            await db.commit()
+        await self._store_usage_custom_value(_CURSOR_FIELD, int(cursor))
+
+    async def _load_usage_bootstrap_at(self) -> datetime | None:
+        values = await self._load_usage_custom_map(_BOOTSTRAP_FIELD)
+        raw = values.get(self._usage_cursor_key())
+        if not raw:
+            return None
+        try:
+            parsed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+    async def _ensure_usage_bootstrap_at(self) -> datetime:
+        existing = await self._load_usage_bootstrap_at()
+        if existing is not None:
+            return existing
+        boundary = datetime.now(timezone.utc)
+        await self._store_usage_custom_value(
+            _BOOTSTRAP_FIELD,
+            boundary.isoformat(),
+        )
+        return boundary
+
+    async def _load_usage_legacy_mode(self) -> bool:
+        values = await self._load_usage_custom_map(_LEGACY_FIELD)
+        return bool(values.get(self._usage_cursor_key(), False))
+
+    async def _store_usage_legacy_mode(self, enabled: bool) -> None:
+        await self._store_usage_custom_value(_LEGACY_FIELD, bool(enabled))
 
     # ------------------------------------------------------------------
     # Bambuddy durable ledger
     # ------------------------------------------------------------------
 
-    async def _fetch_usage_page(self, after_id: int) -> tuple[str, dict | None]:
+    async def _fetch_usage_page(
+        self,
+        after_id: int,
+        *,
+        bootstrap_before: datetime | None = None,
+    ) -> tuple[str, dict | None]:
         """Return (supported|unsupported|transient, JSON payload)."""
         client = getattr(self, "_client", None)
         bambuddy_url = getattr(self, "_bambuddy_url", "")
@@ -131,14 +182,18 @@ class DurableUsageMixin:
         if client is None or not bambuddy_url or not bambuddy_printer_id:
             return "transient", None
 
+        params: dict[str, Any] = {
+            "printer_id": int(bambuddy_printer_id),
+            "after_id": int(after_id),
+            "limit": _PAGE_SIZE,
+        }
+        if bootstrap_before is not None:
+            params["bootstrap_before"] = bootstrap_before.astimezone(timezone.utc).isoformat()
+
         try:
             response = await client.get(
                 f"{bambuddy_url}/api/v1/inventory/usage-events",
-                params={
-                    "printer_id": int(bambuddy_printer_id),
-                    "after_id": int(after_id),
-                    "limit": _PAGE_SIZE,
-                },
+                params=params,
             )
         except (httpx.HTTPError, OSError) as exc:
             logger.warning("Durable usage ledger request failed: %s", exc)
@@ -167,8 +222,8 @@ class DurableUsageMixin:
     async def _reconcile_usage_events(self) -> str:
         """Replay durable usage rows in order and ACK strictly after commit.
 
-        Returns one of ``supported``, ``unsupported`` or ``transient``.  The
-        latter two never advance a cursor.
+        Returns one of ``supported``, ``unsupported`` or ``transient``. The
+        latter two never advance a durable cursor.
         """
         # Unit tests that construct Driver via object.__new__ intentionally have
         # no mixin state. Keep their legacy protocol tests meaningful and make
@@ -179,22 +234,34 @@ class DurableUsageMixin:
 
         async with lock:
             cursor = await self._load_usage_cursor()
+            legacy_mode = await self._load_usage_legacy_mode() if cursor is None else False
+            bootstrap_at = (
+                await self._ensure_usage_bootstrap_at()
+                if cursor is None and not legacy_mode
+                else None
+            )
             request_after = cursor if cursor is not None else 0
 
             while True:
-                state, payload = await self._fetch_usage_page(request_after)
+                state, payload = await self._fetch_usage_page(
+                    request_after,
+                    bootstrap_before=bootstrap_at if cursor is None else None,
+                )
                 if state != "supported" or payload is None:
                     if state == "unsupported":
                         self._usage_ledger_supported = False
                         self._usage_ledger_retry_at = time.monotonic() + _CAPABILITY_RETRY_SECONDS
-                        # Safe legacy compatibility only before a durable cursor
-                        # has ever existed on this FilaMan printer.
+                        # Compatibility with an explicitly old Bambuddy is safe
+                        # only before a durable cursor exists. Persist this mode
+                        # so if Bambuddy is upgraded later we bootstrap at the
+                        # then-current end, avoiding replay of legacy-era debits.
                         self._usage_legacy_allowed = cursor is None
+                        if cursor is None:
+                            await self._store_usage_legacy_mode(True)
                     return state
 
                 self._usage_ledger_supported = True
                 self._usage_ledger_retry_at = 0.0
-                self._usage_legacy_allowed = False
 
                 try:
                     latest_id = int(payload.get("latest_id") or 0)
@@ -205,18 +272,44 @@ class DurableUsageMixin:
                     return "transient"
 
                 if cursor is None:
-                    # Upgrade bootstrap: existing rows may already have been
-                    # delivered with legacy WebSocket keys. Start at the current
-                    # end of the ledger instead of double-debiting history.
-                    await self._store_usage_cursor(latest_id)
+                    if legacy_mode:
+                        # This printer spent time using the legacy live-only path.
+                        # Those rows may already have been debited under legacy
+                        # event keys, so skip everything through the current end.
+                        baseline = latest_id
+                    else:
+                        raw_baseline = payload.get("bootstrap_id")
+                        if raw_baseline is None:
+                            logger.warning(
+                                "Durable usage ledger lacks bootstrap_id; refusing unsafe first-run bootstrap"
+                            )
+                            return "transient"
+                        try:
+                            baseline = int(raw_baseline)
+                        except (TypeError, ValueError):
+                            return "transient"
+                        if baseline < 0 or baseline > latest_id:
+                            return "transient"
+
+                    await self._store_usage_cursor(baseline)
+                    await self._store_usage_legacy_mode(False)
+                    self._usage_legacy_allowed = False
+                    cursor = baseline
+                    request_after = baseline
+                    bootstrap_at = None
+                    legacy_mode = False
                     logger.info(
-                        "Initialized durable Bambuddy usage cursor for printer %s at %d; "
-                        "historical usage was not replayed",
+                        "Initialized durable Bambuddy usage cursor for printer %s at %d "
+                        "(latest=%d); post-bootstrap usage will be replayed",
                         getattr(self, "_bambuddy_printer_id", None),
+                        baseline,
                         latest_id,
                     )
-                    return "supported"
+                    # Refetch starting exactly after the safe baseline. The first
+                    # response may have been capped to old historical rows.
+                    continue
 
+                self._usage_legacy_allowed = False
                 if latest_id < cursor:
                     # A Bambuddy DB/volume reset can reuse integer IDs. Never
                     # auto-rewind because that risks colliding with already
@@ -257,14 +350,19 @@ class DurableUsageMixin:
 
                     weight = _finite_float(item.get("weight_used"))
                     if weight is None:
-                        logger.warning("Usage event %s has invalid weight; leaving cursor unchanged", usage_id)
+                        logger.warning(
+                            "Usage event %s has invalid weight; leaving cursor unchanged",
+                            usage_id,
+                        )
                         return "transient"
 
                     filaman_spool_id = _positive_int(item.get("filaman_spool_id"))
                     if filaman_spool_id is None:
                         bambuddy_spool_id = _positive_int(item.get("spool_id"))
                         if bambuddy_spool_id is not None:
-                            filaman_spool_id = await self._resolve_bambuddy_spool_id(bambuddy_spool_id)
+                            filaman_spool_id = await self._resolve_bambuddy_spool_id(
+                                bambuddy_spool_id
+                            )
                     if filaman_spool_id is None:
                         logger.warning(
                             "Cannot map durable Bambuddy usage event %s to a FilaMan spool; "
@@ -277,10 +375,10 @@ class DurableUsageMixin:
                     # durable event that must be acknowledged to avoid blocking
                     # all later valid rows forever.
                     if weight > 0:
-                        event_at = _parse_event_at(item.get("created_at"))
+                        event_at, event_stamp = _event_time(item.get("created_at"))
                         source_key = (
                             f"bambuddy:usage:{getattr(self, '_bambuddy_printer_id', '')}:"
-                            f"{usage_id}:{_event_stamp(event_at)}"
+                            f"{usage_id}:{event_stamp}"
                         )
                         ok = await self._write_durable_consumption(
                             int(filaman_spool_id),
@@ -375,10 +473,7 @@ class DurableUsageMixin:
             return
 
         now = time.monotonic()
-        if (
-            self._usage_ledger_supported is False
-            and now < self._usage_ledger_retry_at
-        ):
+        if self._usage_ledger_supported is False and now < self._usage_ledger_retry_at:
             if self._usage_legacy_allowed:
                 await super()._handle_spool_usage_logged(event)
             return
@@ -393,12 +488,20 @@ class DurableUsageMixin:
         """Catch anything missed by WebSocket reconnects or FINISH-time outages."""
         while getattr(self, "_running", False):
             try:
-                if not getattr(self, "_spoolman_enabled", False):
+                retry_blocked = (
+                    self._usage_ledger_supported is False
+                    and time.monotonic() < self._usage_ledger_retry_at
+                )
+                if not getattr(self, "_spoolman_enabled", False) and not retry_blocked:
                     await self._reconcile_usage_events()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                logger.warning("Durable usage reconciliation failed: %s", exc, exc_info=True)
+                logger.warning(
+                    "Durable usage reconciliation failed: %s",
+                    exc,
+                    exc_info=True,
+                )
 
             try:
                 await asyncio.sleep(_REPLAY_INTERVAL_SECONDS)
@@ -422,18 +525,17 @@ def _finite_float(value: Any) -> float | None:
     return parsed if math.isfinite(parsed) else None
 
 
-def _parse_event_at(value: Any) -> datetime:
+def _event_time(value: Any) -> tuple[datetime, str]:
+    """Return an event timestamp plus a deterministic idempotency-key stamp."""
     if value:
         try:
             parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
             if parsed.tzinfo is None:
                 parsed = parsed.replace(tzinfo=timezone.utc)
-            return parsed.astimezone(timezone.utc)
+            parsed = parsed.astimezone(timezone.utc)
+            return parsed, parsed.strftime("%Y%m%dT%H%M%S.%fZ")
         except (TypeError, ValueError):
-            pass
-    return datetime.now(timezone.utc)
-
-
-def _event_stamp(event_at: datetime) -> str:
-    """Stable compact timestamp also protects keys if a Bambuddy DB is rebuilt."""
-    return event_at.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+            # The DB model always supplies created_at, but if a future server
+            # sends malformed data the key must remain stable across retries.
+            return datetime.now(timezone.utc), "invalid-time"
+    return datetime.now(timezone.utc), "unknown-time"
