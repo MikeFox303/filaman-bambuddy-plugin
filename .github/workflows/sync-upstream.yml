@@ -85,7 +85,7 @@ jobs:
       - name: Report merge conflict
         if: steps.merge.outputs.conflict == 'true'
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN || github.token }}
           UPSTREAM_SHA: ${{ steps.merge.outputs.upstream_sha }}
         shell: bash
         run: |
@@ -123,7 +123,7 @@ jobs:
       - name: Publish code changes for semantic review
         if: steps.merge.outputs.changed == 'true' && steps.merge.outputs.conflict != 'true' && steps.merge.outputs.sensitive == 'true'
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN || github.token }}
           UPSTREAM_SHA: ${{ steps.merge.outputs.upstream_sha }}
         shell: bash
         run: |
