@@ -114,7 +114,7 @@ jobs:
         if: steps.merge.outputs.changed == 'true' && steps.merge.outputs.conflict != 'true'
         env:
           UPSTREAM_SHA: ${{ steps.merge.outputs.upstream_sha }}
-        run: git commit -m "chore: sync upstream ${UPSTREAM_SHA}"
+        run: 'git commit -m "chore: sync upstream ${UPSTREAM_SHA}"'
 
       - name: Auto-advance documentation-only updates
         if: steps.merge.outputs.changed == 'true' && steps.merge.outputs.conflict != 'true' && steps.merge.outputs.sensitive == 'false'
