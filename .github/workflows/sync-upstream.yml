@@ -91,9 +91,11 @@ jobs:
         run: |
           set -euo pipefail
           title="Bambuddy plugin upstream conflict: ${UPSTREAM_SHA}"
-          existing="$(gh issue list --state open --search "${title} in:title" --json number --jq '.[0].number // empty')"
+          existing="$(gh api "repos/${GITHUB_REPOSITORY}/issues?state=open&per_page=100" --paginate --jq ".[] | select(.pull_request == null and .title == \"${title}\") | .number" | head -1)"
           if [[ -z "$existing" ]]; then
-            gh issue create --title "$title" --body "Guarded sync found conflicts against ${UPSTREAM_REPO}@${UPSTREAM_SHA}. Nothing was merged. Preserve source_event_key idempotency, MissingGreenlet-safe writes, X2D external slots, inventory_only and RU/UA localized action labels."
+            gh api --method POST "repos/${GITHUB_REPOSITORY}/issues" \
+              -f title="$title" \
+              -f body="Guarded sync found conflicts against ${UPSTREAM_REPO}@${UPSTREAM_SHA}. Nothing was merged. Preserve source_event_key idempotency, MissingGreenlet-safe writes, X2D external slots, inventory_only and RU/UA localized action labels." >/dev/null
           fi
           exit 1
 
@@ -130,11 +132,18 @@ jobs:
           set -euo pipefail
           git fetch origin "$SYNC_BRANCH" || true
           git push --force-with-lease origin "HEAD:${SYNC_BRANCH}"
-          existing="$(gh pr list --head "$SYNC_BRANCH" --base main --state open --json number --jq '.[0].number // empty')"
+          owner="${GITHUB_REPOSITORY_OWNER}"
+          existing="$(gh api "repos/${GITHUB_REPOSITORY}/pulls?state=open&head=${owner}:${SYNC_BRANCH}&base=main&per_page=100" --jq '.[0].number // empty')"
           body="Guarded plugin update from ${UPSTREAM_REPO}@${UPSTREAM_SHA}. Code changed, so automatic merge is blocked. CI is dispatched explicitly. Do not merge if plugin version decreases or if source_event_key, X2D external mapping, inventory_only, async-safe consumption, RU/UA labels or managed-package compatibility regress."
           if [[ -z "$existing" ]]; then
-            gh pr create --base main --head "$SYNC_BRANCH" --title 'chore: guarded plugin upstream sync' --body "$body"
+            gh api --method POST "repos/${GITHUB_REPOSITORY}/pulls" \
+              -f base=main \
+              -f head="$SYNC_BRANCH" \
+              -f title='chore: guarded plugin upstream sync' \
+              -f body="$body" >/dev/null
           else
-            gh pr edit "$existing" --body "$body"
+            gh api --method PATCH "repos/${GITHUB_REPOSITORY}/pulls/${existing}" \
+              -f body="$body" >/dev/null
           fi
-          gh workflow run ci.yml --ref "$SYNC_BRANCH"
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/dispatches" \
+            -f ref="$SYNC_BRANCH"
